@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         return (
             f"postgresql://{self.db_user}:{self.db_password}"
-            f"@{self.db_host}:{self.db_port}/{self.db_name}"
+            f"@{self.db_host}:{self.db_port}/{self.db_name}?sslmode=require"
         )
 
 

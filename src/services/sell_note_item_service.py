@@ -23,10 +23,22 @@ def get_by_id(db: Session, sell_note_id: uuid.UUID, item_id: uuid.UUID) -> SellN
 
 
 def create(db: Session, sell_note_id: uuid.UUID, data: SellNoteItemCreate) -> SellNoteItem:
-    sell_note_service.get_by_id(db, sell_note_id)  # ensures sell note exists
+    from src.services import pdf_service
+    from src.services.aws import s3
+
+    sell_note = sell_note_service.get_by_id(db, sell_note_id)
     if not product_repository.get_by_id(db, data.product_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
-    return sell_note_item_repository.create(db, sell_note_id, data)
+    item = sell_note_item_repository.create(db, sell_note_id, data)
+
+    # Regenerate PDF with updated items
+    sell_note = sell_note_service.get_by_id(db, sell_note_id)
+    if sell_note.pdf_s3_key:
+        pdf_bytes = pdf_service.generate_sell_note_pdf(sell_note)
+        current_metadata = s3.get_object_metadata(sell_note.pdf_s3_key)
+        s3.upload_file(pdf_bytes, sell_note.pdf_s3_key, content_type="application/pdf", metadata=current_metadata)
+
+    return item
 
 
 def update(db: Session, sell_note_id: uuid.UUID, item_id: uuid.UUID, data: SellNoteItemUpdate) -> SellNoteItem:

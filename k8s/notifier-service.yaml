@@ -1,0 +1,15 @@
+# ClusterIP: only accessible from inside the cluster (receipt-worker and api call it).
+# No external exposure needed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: notifier-service
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: notifier
+  ports:
+    - protocol: TCP
+      port: 8003
+      targetPort: 8003

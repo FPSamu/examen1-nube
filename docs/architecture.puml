@@ -1,0 +1,79 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontName Arial
+skinparam defaultFontSize 11
+skinparam ArrowColor #2c3e50
+skinparam ArrowThickness 1.5
+
+skinparam rectangle {
+  BackgroundColor #EAF4FB
+  BorderColor #2980B9
+  FontColor #1a252f
+}
+
+skinparam database {
+  BackgroundColor #FEF9E7
+  BorderColor #F39C12
+}
+
+skinparam queue {
+  BackgroundColor #FDEDEC
+  BorderColor #E74C3C
+}
+
+skinparam cloud {
+  BackgroundColor #EAFAF1
+  BorderColor #27AE60
+}
+
+skinparam actor {
+  BackgroundColor #F4ECF7
+  BorderColor #8E44AD
+}
+
+title Arquitectura – Sales API en Kubernetes
+
+actor "Cliente HTTP" as client
+
+package "Clúster EKS" {
+
+  rectangle "**api**\n(Deployment + Service LoadBalancer)\n─────────────────────────\nCRUD: clientes, domicilios,\nproductos, notas de venta\n─────────────────────────\nPOST /sell-notes → publica a SQS\nGET  .../pdf/download → S3\nPOST .../notify → notifier" as api
+
+  rectangle "**receipt-worker**\n(Deployment, sin Service)\n─────────────────────────\nConsume mensajes SQS\nConsulta RDS\nLlama pdf-generator\nLlama notifier" as worker
+
+  rectangle "**pdf-generator**\n(Deployment + Service ClusterIP)\n─────────────────────────\nRecibe datos de la nota\nGenera PDF (reportlab)\nSube a S3 con metadatos\nDevuelve s3_key" as pdf
+
+  rectangle "**notifier**\n(Deployment + Service ClusterIP)\n─────────────────────────\nActualiza metadatos S3\n(veces-enviado++, hora-envio)\nEnvía email vía SNS" as notifier
+}
+
+package "AWS" {
+  queue "**SQS**\nsales-sell-notes" as sqs
+  database "**RDS**\nPostgreSQL" as rds
+  cloud "**S3**\n750900-esi3898k-examen2\n{rfc}/{folio}.pdf" as s3
+  cloud "**SNS**\nTopic email" as sns
+  cloud "**Secrets Manager**\nsales/db · sales/sqs\nsales/s3 · sales/sns" as sm
+}
+
+client --> api : HTTP
+
+api --> sqs : publish sell_note_id
+api --> rds : CRUD
+api --> s3 : download PDF\nnota-descargada=true
+api --> notifier : re-notify (manual)
+
+worker --> sqs : long-poll
+worker --> rds : read sell_note
+worker --> pdf : POST /generate
+worker --> notifier : POST /notify
+
+pdf --> s3 : upload PDF\nhora-envio, nota-descargada=false\nveces-enviado=1
+
+notifier --> s3 : update metadata\nveces-enviado++\nhora-envio=now
+notifier --> sns : publish email
+
+api ..> sm : lee secretos\nen startup
+worker ..> sm : lee secretos\nen startup
+pdf ..> sm : lee secretos\nen startup
+notifier ..> sm : lee secretos\nen startup
+
+@enduml

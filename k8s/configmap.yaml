@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sales-config
+  namespace: default
+data:
+  AWS_REGION: "us-east-1"
+  USE_SECRETS_MANAGER: "true"
+  # Internal Kubernetes service DNS names
+  PDF_GENERATOR_URL: "http://pdf-generator-service:8001"
+  NOTIFIER_URL: "http://notifier-service:8003"
+  # Public-facing URL (replace with your LoadBalancer or Ingress address)
+  API_BASE_URL: "http://REPLACE_WITH_API_EXTERNAL_URL"

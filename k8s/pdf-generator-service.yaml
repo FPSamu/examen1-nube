@@ -1,0 +1,15 @@
+# ClusterIP: only accessible from inside the cluster (receipt-worker calls it).
+# No external exposure needed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pdf-generator-service
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: pdf-generator
+  ports:
+    - protocol: TCP
+      port: 8001
+      targetPort: 8001

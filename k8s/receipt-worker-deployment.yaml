@@ -1,0 +1,23 @@
+# receipt-worker does NOT need a Service: it consumes from SQS (pull model),
+# it is never called by other pods. No incoming network traffic.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: receipt-worker
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: receipt-worker
+  template:
+    metadata:
+      labels:
+        app: receipt-worker
+    spec:
+      containers:
+        - name: receipt-worker
+          image: samupif/sales-receipt-worker:latest
+          envFrom:
+            - configMapRef:
+                name: sales-config

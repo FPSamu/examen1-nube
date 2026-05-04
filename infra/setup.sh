@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# infra/setup.sh – Provision all AWS resources for the sales API on Kubernetes
+# infra/setup.sh – Provision all AWS resources for the Sales API on Kubernetes
 # Prerequisites: AWS CLI configured, eksctl installed, kubectl installed
-# Usage: bash infra/setup.sh
+# Usage:
+#   export NOTIFICATION_EMAIL="tu@correo.com"
+#   export EXPEDIENTE="750900"          # default: 750900
+#   bash infra/setup.sh
 # =============================================================================
 set -euo pipefail
 
-# ---------- Configuration (edit these) ---------------------------------------
+# ---------- Configuration ----------------------------------------------------
 AWS_REGION="us-east-1"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 CLUSTER_NAME="sales-cluster"
@@ -15,24 +18,42 @@ DB_NAME="salesdb"
 DB_USER="salesadmin"
 DB_PASSWORD="$(openssl rand -base64 20 | tr -dc 'A-Za-z0-9' | head -c 20)"
 SQS_QUEUE_NAME="sales-sell-notes"
-EXPEDIENTE="${EXPEDIENTE:-750900}"           # set via env: export EXPEDIENTE=xxxxxx
+EXPEDIENTE="${EXPEDIENTE:-750900}"
 S3_BUCKET_NAME="${EXPEDIENTE}-esi3898k-examen2"
 SNS_TOPIC_NAME="sales-notifications"
-NOTIFICATION_EMAIL="${NOTIFICATION_EMAIL:-your@email.com}"  # override via env
+NOTIFICATION_EMAIL="${NOTIFICATION_EMAIL:-your@email.com}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # -----------------------------------------------------------------------------
 
-echo "=== [1/8] Creating EKS cluster ==="
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-eksctl create cluster -f "$SCRIPT_DIR/cluster.yaml"
+echo "Account ID : $ACCOUNT_ID"
+echo "S3 Bucket  : $S3_BUCKET_NAME"
+echo ""
 
-echo "=== [2/8] Creating SQS queue ==="
+# =============================================================================
+echo "=== [1/7] Creating EKS cluster ==="
+# Substitute real ACCOUNT_ID so eksctl can find the pre-existing LabRole.
+CLUSTER_CONFIG="$(mktemp /tmp/cluster-XXXXXX.yaml)"
+sed "s/ACCOUNT_ID_PLACEHOLDER/$ACCOUNT_ID/g" "$SCRIPT_DIR/cluster.yaml" > "$CLUSTER_CONFIG"
+eksctl create cluster -f "$CLUSTER_CONFIG"
+rm -f "$CLUSTER_CONFIG"
+
+# Get the VPC created by eksctl so that RDS is in the same network as the pods.
+EKS_VPC_ID=$(aws eks describe-cluster \
+  --name "$CLUSTER_NAME" \
+  --query "cluster.resourcesVpcConfig.vpcId" \
+  --output text --region "$AWS_REGION")
+echo "EKS VPC: $EKS_VPC_ID"
+
+# =============================================================================
+echo "=== [2/7] Creating SQS queue ==="
 SQS_QUEUE_URL=$(aws sqs create-queue \
   --queue-name "$SQS_QUEUE_NAME" \
   --region "$AWS_REGION" \
   --query QueueUrl --output text)
-echo "SQS Queue URL: $SQS_QUEUE_URL"
+echo "SQS URL: $SQS_QUEUE_URL"
 
-echo "=== [3/8] Creating S3 bucket ==="
+# =============================================================================
+echo "=== [3/7] Creating S3 bucket ==="
 if [ "$AWS_REGION" = "us-east-1" ]; then
   aws s3api create-bucket --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION"
 else
@@ -41,7 +62,8 @@ else
 fi
 echo "S3 Bucket: $S3_BUCKET_NAME"
 
-echo "=== [4/8] Creating SNS topic and email subscription ==="
+# =============================================================================
+echo "=== [4/7] Creating SNS topic and email subscription ==="
 SNS_TOPIC_ARN=$(aws sns create-topic --name "$SNS_TOPIC_NAME" \
   --region "$AWS_REGION" --query TopicArn --output text)
 aws sns subscribe \
@@ -50,21 +72,20 @@ aws sns subscribe \
   --notification-endpoint "$NOTIFICATION_EMAIL" \
   --region "$AWS_REGION"
 echo "SNS Topic ARN: $SNS_TOPIC_ARN"
-echo "Confirm the subscription in your email: $NOTIFICATION_EMAIL"
+echo ">>> Confirma la suscripción en tu email: $NOTIFICATION_EMAIL <<<"
 
-echo "=== [5/8] Creating RDS PostgreSQL instance ==="
-# Get default VPC and subnets
-VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" \
-  --query "Vpcs[0].VpcId" --output text --region "$AWS_REGION")
+# =============================================================================
+echo "=== [5/7] Creating RDS PostgreSQL instance (inside EKS VPC) ==="
+
+# Use EKS subnets so pods can reach the database without cross-VPC routing.
 SUBNET_IDS=$(aws ec2 describe-subnets \
-  --filters "Name=vpc-id,Values=$VPC_ID" \
+  --filters "Name=vpc-id,Values=$EKS_VPC_ID" \
   --query "Subnets[*].SubnetId" --output text --region "$AWS_REGION" | tr '\t' ',')
 
-# Security group: allow PostgreSQL from anywhere within VPC
 SG_ID=$(aws ec2 create-security-group \
   --group-name "sales-rds-sg" \
   --description "Allow PostgreSQL from EKS nodes" \
-  --vpc-id "$VPC_ID" \
+  --vpc-id "$EKS_VPC_ID" \
   --region "$AWS_REGION" \
   --query GroupId --output text)
 aws ec2 authorize-security-group-ingress \
@@ -72,7 +93,6 @@ aws ec2 authorize-security-group-ingress \
   --protocol tcp --port 5432 --cidr "0.0.0.0/0" \
   --region "$AWS_REGION"
 
-# DB subnet group
 aws rds create-db-subnet-group \
   --db-subnet-group-name "sales-db-subnet-group" \
   --db-subnet-group-description "Sales DB subnet group" \
@@ -83,7 +103,7 @@ aws rds create-db-instance \
   --db-instance-identifier "$DB_INSTANCE_ID" \
   --db-instance-class db.t3.micro \
   --engine postgres \
-  --engine-version "15.4" \
+  --engine-version "16" \
   --master-username "$DB_USER" \
   --master-user-password "$DB_PASSWORD" \
   --db-name "$DB_NAME" \
@@ -93,7 +113,7 @@ aws rds create-db-instance \
   --no-publicly-accessible \
   --region "$AWS_REGION"
 
-echo "Waiting for RDS instance to be available (this may take ~5 minutes)..."
+echo "Waiting for RDS instance (~5 min)..."
 aws rds wait db-instance-available \
   --db-instance-identifier "$DB_INSTANCE_ID" \
   --region "$AWS_REGION"
@@ -104,64 +124,58 @@ DB_HOST=$(aws rds describe-db-instances \
   --output text --region "$AWS_REGION")
 echo "RDS endpoint: $DB_HOST"
 
-echo "=== [6/8] Storing secrets in Secrets Manager ==="
+# =============================================================================
+echo "=== [6/7] Storing secrets in Secrets Manager ==="
 aws secretsmanager create-secret \
-  --name "sales/db" \
-  --region "$AWS_REGION" \
+  --name "sales/db" --region "$AWS_REGION" \
   --secret-string "{\"host\":\"$DB_HOST\",\"port\":\"5432\",\"name\":\"$DB_NAME\",\"user\":\"$DB_USER\",\"password\":\"$DB_PASSWORD\"}"
 
 aws secretsmanager create-secret \
-  --name "sales/sqs" \
-  --region "$AWS_REGION" \
+  --name "sales/sqs" --region "$AWS_REGION" \
   --secret-string "{\"queue_url\":\"$SQS_QUEUE_URL\"}"
 
 aws secretsmanager create-secret \
-  --name "sales/s3" \
-  --region "$AWS_REGION" \
+  --name "sales/s3" --region "$AWS_REGION" \
   --secret-string "{\"bucket_name\":\"$S3_BUCKET_NAME\"}"
 
 aws secretsmanager create-secret \
-  --name "sales/sns" \
-  --region "$AWS_REGION" \
+  --name "sales/sns" --region "$AWS_REGION" \
   --secret-string "{\"topic_arn\":\"$SNS_TOPIC_ARN\"}"
 
-echo "=== [7/8] Attaching LabRole to node group (IAM access for pods) ==="
-NODE_GROUP_ROLE=$(aws eks describe-nodegroup \
-  --cluster-name "$CLUSTER_NAME" \
-  --nodegroup-name standard-workers \
-  --region "$AWS_REGION" \
-  --query "nodegroup.nodeRole" --output text | awk -F/ '{print $NF}')
-
-for policy in \
-  "arn:aws:iam::aws:policy/AmazonSQSFullAccess" \
-  "arn:aws:iam::aws:policy/AmazonS3FullAccess" \
-  "arn:aws:iam::aws:policy/AmazonSNSFullAccess" \
-  "arn:aws:iam::aws:policy/SecretsManagerReadWrite"; do
-  aws iam attach-role-policy \
-    --role-name "$NODE_GROUP_ROLE" \
-    --policy-arn "$policy" || true
-done
-
-echo "=== [8/8] Applying Kubernetes manifests ==="
-kubectl apply -f ../k8s/configmap.yaml
-kubectl apply -f ../k8s/api-deployment.yaml
-kubectl apply -f ../k8s/api-service.yaml
-kubectl apply -f ../k8s/receipt-worker-deployment.yaml
-kubectl apply -f ../k8s/pdf-generator-deployment.yaml
-kubectl apply -f ../k8s/pdf-generator-service.yaml
-kubectl apply -f ../k8s/notifier-deployment.yaml
-kubectl apply -f ../k8s/notifier-service.yaml
+# =============================================================================
+echo "=== [7/7] Applying Kubernetes manifests ==="
+K8S_DIR="$SCRIPT_DIR/../k8s"
+kubectl apply -f "$K8S_DIR/configmap.yaml"
+kubectl apply -f "$K8S_DIR/api-deployment.yaml"
+kubectl apply -f "$K8S_DIR/api-service.yaml"
+kubectl apply -f "$K8S_DIR/receipt-worker-deployment.yaml"
+kubectl apply -f "$K8S_DIR/pdf-generator-deployment.yaml"
+kubectl apply -f "$K8S_DIR/pdf-generator-service.yaml"
+kubectl apply -f "$K8S_DIR/notifier-deployment.yaml"
+kubectl apply -f "$K8S_DIR/notifier-service.yaml"
 
 echo ""
-echo "=========================================="
-echo "Infrastructure provisioned successfully."
-echo "DB host:       $DB_HOST"
-echo "SQS URL:       $SQS_QUEUE_URL"
-echo "S3 Bucket:     $S3_BUCKET_NAME"
-echo "SNS Topic ARN: $SNS_TOPIC_ARN"
+echo "============================================================"
+echo "Infraestructura aprovisionada exitosamente."
 echo ""
-echo "Next steps:"
-echo "  1. Confirm the SNS subscription email."
-echo "  2. Update k8s/configmap.yaml with the API LoadBalancer URL once assigned."
-echo "  3. Run the DB schema migration (see README.md)."
-echo "=========================================="
+echo "  DB_HOST   : $DB_HOST"
+echo "  DB_USER   : $DB_USER"
+echo "  DB_PASS   : $DB_PASSWORD"
+echo "  SQS URL   : $SQS_QUEUE_URL"
+echo "  S3 Bucket : $S3_BUCKET_NAME"
+echo "  SNS ARN   : $SNS_TOPIC_ARN"
+echo ""
+echo "Siguientes pasos:"
+echo "  1. Confirmar suscripción SNS en el email."
+echo "  2. Correr el schema SQL (ver abajo)."
+echo "  3. Obtener URL del LoadBalancer:"
+echo "       kubectl get svc api-service"
+echo "  4. Actualizar API_BASE_URL en k8s/configmap.yaml y aplicar:"
+echo "       kubectl apply -f k8s/configmap.yaml"
+echo "       kubectl rollout restart deployment/api deployment/receipt-worker"
+echo ""
+echo "--- Schema migration (ejecutar desde WSL): ---"
+echo "kubectl run psql-migration --image=postgres:15 --restart=Never -it --rm \\"
+echo "  --env=PGPASSWORD=$DB_PASSWORD -- \\"
+echo "  psql -h $DB_HOST -U $DB_USER -d $DB_NAME -f /dev/stdin"
+echo "============================================================"

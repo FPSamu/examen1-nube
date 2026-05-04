@@ -4,7 +4,10 @@ kind: ClusterConfig
 metadata:
   name: sales-cluster
   region: us-east-1
-  version: "1.29"
+  version: "1.32"
+
+iam:
+  serviceRoleARN: "arn:aws:iam::ACCOUNT_ID_PLACEHOLDER:role/LabRole"
 
 managedNodeGroups:
   - name: standard-workers
@@ -13,11 +16,6 @@ managedNodeGroups:
     desiredCapacity: 2
     maxSize: 3
     iam:
-      attachPolicyARNs:
-        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
-        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
-        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
-        - arn:aws:iam::aws:policy/AmazonSQSFullAccess
-        - arn:aws:iam::aws:policy/AmazonS3FullAccess
-        - arn:aws:iam::aws:policy/AmazonSNSFullAccess
-        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+      # Learner Lab: eksctl cannot create IAM roles; reuse the pre-existing LabRole.
+      # ACCOUNT_ID_PLACEHOLDER is substituted by setup.sh before calling eksctl.
+      instanceRoleARN: "arn:aws:iam::ACCOUNT_ID_PLACEHOLDER:role/LabRole"
